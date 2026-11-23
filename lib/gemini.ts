@@ -82,7 +82,7 @@ CRITICAL INSTRUCTIONS:
 export async function generateDiagramWithChecks(
   concept: ScienceConcept,
   apiKey?: string,
-  modelName: string = 'gemini-2.5-flash-lite'
+  modelName: string = 'gemini-3.5-flash-lite'
 ): Promise<DiagramResult> {
   const key = apiKey || process.env.GEMINI_API_KEY;
   if (!key) {
