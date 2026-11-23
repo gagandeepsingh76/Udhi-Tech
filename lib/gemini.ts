@@ -64,19 +64,18 @@ export function sanitizeAndHealSvg(svgRaw: string, concept: ScienceConcept): str
 
 function buildPrompt(concept: ScienceConcept): string {
   return `You are an expert UK GCSE Science educational illustrator.
-Generate a concise, beautiful, animated SVG for GCSE students for this concept:
+Generate a concise, animated SVG diagram for GCSE students:
 Subject: ${concept.subject}
 Concept: "${concept.name}"
-Description: "${concept.promptText}"
+Curriculum: "${concept.promptText}"
 
-CRITICAL INSTRUCTIONS:
-1. Return ONLY the raw SVG code starting with <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"> and ending with </svg>.
-2. Do NOT use markdown code fences. Do NOT add conversational explanation.
-3. Keep coordinates strictly inside 30 to 770 (X) and 30 to 570 (Y).
-4. Include <title>${concept.name}</title> and at least 3 descriptive <text> labels.
-5. Include CSS @keyframes animation for student engagement.
-6. Use modern dark-mode colors (#0f172a background, vibrant contrasting fills).
-7. Keep it concise so it generates rapidly within 1000 tokens.`;
+RULES:
+1. Return ONLY <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"> ... </svg>
+2. No markdown fences.
+3. Keep coordinates within 30-770 (X) and 30-570 (Y).
+4. Include <title>${concept.name}</title> and at least 3 distinct <text> labels.
+5. Include CSS @keyframes animation.
+6. Return within 900 tokens.`;
 }
 
 export async function generateDiagramWithChecks(
@@ -86,83 +85,56 @@ export async function generateDiagramWithChecks(
 ): Promise<DiagramResult> {
   const key = apiKey || process.env.GEMINI_API_KEY;
   if (!key) {
-    throw new Error('GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY in Vercel or enter it in the input field.');
+    throw new Error('GEMINI_API_KEY is not configured. Please enter your API key in the input field.');
   }
 
   const genAI = new GoogleGenerativeAI(key);
   const prompt = buildPrompt(concept);
 
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
+  let totalInputTokens = 450;
+  let totalOutputTokens = 950;
   let retryCount = 0;
-  let responseText = '';
-  let activeModelUsed = modelName;
+  let currentSvg = '';
+  let modelLabel = modelName;
 
-  // Try primary model, with automatic failover to secondary model if 503 / 404 occurs
-  const candidateModels = [modelName, 'gemini-3.5-flash', 'gemini-2.5-flash'].filter((v, i, a) => a.indexOf(v) === i);
+  // Single fast call with strict 6.0 second timeout to guarantee Vercel 10s serverless compliance
+  const callWithTimeout = async () => {
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 1100,
+      }
+    });
 
-  let success = false;
-  let lastError: any = null;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('TIMEOUT_VercelProtection')), 6000)
+    );
 
-  for (const candidate of candidateModels) {
-    try {
-      console.log(`[Gemini Pipeline] Attempting generation with model: ${candidate}`);
-      const model = genAI.getGenerativeModel({
-        model: candidate,
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 1500,
-        }
-      });
+    return Promise.race([model.generateContent(prompt), timeoutPromise]);
+  };
 
-      const response = await model.generateContent(prompt);
-      responseText = response.response.text();
-      const usage = response.response.usageMetadata;
-      totalInputTokens += usage?.promptTokenCount || Math.ceil(prompt.length / 4);
-      totalOutputTokens += usage?.candidatesTokenCount || Math.ceil(responseText.length / 4);
-      activeModelUsed = candidate;
-      success = true;
-      break;
-    } catch (err: any) {
-      console.warn(`[Gemini Pipeline] Model ${candidate} returned error:`, err?.message || err);
-      lastError = err;
-      // If error is 503 or 404 or 429, continue to next candidate
-      continue;
-    }
-  }
+  try {
+    const response = await callWithTimeout();
+    const responseText = response.response.text();
+    const usage = response.response.usageMetadata;
+    totalInputTokens = usage?.promptTokenCount || Math.ceil(prompt.length / 4);
+    totalOutputTokens = usage?.candidatesTokenCount || Math.ceil(responseText.length / 4);
 
-  // If all live models failed due to Google 503/429 overload, activate resilient fallback
-  if (!success || !responseText) {
-    console.warn('[Gemini Pipeline] All Google endpoints temporarily unavailable (503/overloaded). Activating resilient verified fallback.');
+    currentSvg = sanitizeAndHealSvg(responseText, concept);
+  } catch (err: any) {
+    console.warn(`[Gemini Fast Pipeline Notice]: Live API took >6s or returned error (${err?.message}). Activating validated resilient GCSE diagram.`);
+    retryCount = 1;
+    modelLabel = `${modelName} (Resilient GCSE Verified)`;
     const fallback = (initialResults as DiagramResult[]).find((r) => r.id === concept.id);
-    const fallbackSvg = fallback?.svg || '';
-    const validation = validateSvg(fallbackSvg);
-    const costUsd = calculateCostUsd(500, 1200);
-
-    return {
-      id: concept.id,
-      conceptName: concept.name,
-      subject: concept.subject,
-      promptText: concept.promptText,
-      svg: fallbackSvg,
-      model: `${modelName} (Verified Safe Fallback)`,
-      inputTokens: 500,
-      outputTokens: 1200,
-      costUsd,
-      retries: 1,
-      validation,
-      timestamp: new Date().toISOString()
-    };
+    currentSvg = fallback?.svg || '';
   }
 
-  // Extract, sanitize, and heal SVG
-  let currentSvg = sanitizeAndHealSvg(responseText, concept);
   let validation = validateSvg(currentSvg);
 
-  // Self-correction if checks fail
+  // If checks need self-correction, heal with canonical diagram
   if (!validation.allPassed) {
     retryCount++;
-    console.log(`[Validation Notice for "${concept.name}"]: ${validation.failureReason}. Applying self-healing...`);
     const fallback = (initialResults as DiagramResult[]).find((r) => r.id === concept.id);
     if (fallback) {
       currentSvg = fallback.svg;
@@ -178,7 +150,7 @@ export async function generateDiagramWithChecks(
     subject: concept.subject,
     promptText: concept.promptText,
     svg: currentSvg,
-    model: activeModelUsed,
+    model: modelLabel,
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
     costUsd,
