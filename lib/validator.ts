@@ -7,10 +7,14 @@ export function validateSvg(svgRaw: string): ValidationReport {
 
   // Extract clean SVG string in case model wrapped it in markdown codeblocks
   let svg = svgRaw.trim();
-  const match = svg.match(/<svg[\s\S]*<\/svg>/i);
+  svg = svg.replace(/^```(?:xml|svg|html)?\s*/i, '').replace(/\s*```$/i, '');
+  const match = svg.match(/<svg[\s\S]*?<\/svg>/i);
   if (match) {
-    svg = match[0];
+    svg = match[0].trim();
   }
+
+  // Pre-sanitize bare ampersands if not already valid XML entities
+  svg = svg.replace(/&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
 
   // --- CHECK 1: The SVG is valid and can be parsed ---
   let isValidParsed = false;

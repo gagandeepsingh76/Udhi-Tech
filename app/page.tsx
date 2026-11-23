@@ -239,7 +239,7 @@ export default function ReviewPortal() {
               >
                 <option value="gemini-2.5-flash">gemini-2.5-flash (Recommended)</option>
                 <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Best Free Tier)</option>
-                <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+                <option value="gemini-2.0-flash">gemini-2.0-flash (Fast &amp; Reliable)</option>
               </select>
             </div>
 
@@ -317,9 +317,19 @@ export default function ReviewPortal() {
                 Instant-load verified dataset with programmatic code checks and persistent reviewer feedback.
               </p>
             </div>
-            <div className="flex items-center gap-2 text-xs text-slate-500">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
-              Persistence: Browser LocalStorage (retains across refreshes)
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setResults(initialResultsData as DiagramResult[])}
+                className="text-xs text-slate-600 hover:text-slate-900 font-medium px-2.5 py-1 rounded border border-slate-300 hover:bg-slate-100 transition flex items-center gap-1"
+                title="Reset table to pristine verified diagrams"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Reset Diagrams
+              </button>
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                Persistence: LocalStorage
+              </div>
             </div>
           </div>
 
