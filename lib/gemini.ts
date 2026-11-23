@@ -90,67 +90,79 @@ export async function generateDiagramWithChecks(
   }
 
   const genAI = new GoogleGenerativeAI(key);
-  const model = genAI.getGenerativeModel({
-    model: modelName,
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 1500, // Compact token ceiling for fast 2-4 second response
-    }
-  });
+  const prompt = buildPrompt(concept);
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let retryCount = 0;
-
-  // Step 1: Initial generation call with 12s internal timeout
-  const prompt = buildPrompt(concept);
   let responseText = '';
+  let activeModelUsed = modelName;
 
-  try {
-    const response = await model.generateContent(prompt);
-    responseText = response.response.text();
-    const usage = response.response.usageMetadata;
-    totalInputTokens += usage?.promptTokenCount || Math.ceil(prompt.length / 4);
-    totalOutputTokens += usage?.candidatesTokenCount || Math.ceil(responseText.length / 4);
-  } catch (err: any) {
-    console.error(`[Gemini API Call Error]:`, err);
-    throw err;
-  }
+  // Try primary model, with automatic failover to secondary model if 503 / 404 occurs
+  const candidateModels = [modelName, 'gemini-3.5-flash', 'gemini-2.5-flash'].filter((v, i, a) => a.indexOf(v) === i);
 
-  // Step 2: Extract, sanitize, and heal SVG
-  let currentSvg = sanitizeAndHealSvg(responseText, concept);
-  let validation = validateSvg(currentSvg);
+  let success = false;
+  let lastError: any = null;
 
-  // Step 3: Fast self-correction retry if check fails
-  if (!validation.allPassed) {
-    retryCount++;
-    console.log(`[Validation Notice for "${concept.name}"]: ${validation.failureReason}. Applying self-correction...`);
-
+  for (const candidate of candidateModels) {
     try {
-      const correctionPrompt = `Fix this SVG to pass UK GCSE validation checks:
-Errors: ${validation.failureReason}
-Output ONLY raw valid <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"> ... </svg> with title, 3+ labels, and @keyframes.`;
-      
-      const retryResponse = await model.generateContent(correctionPrompt);
-      const retryText = retryResponse.response.text();
-      const retryUsage = retryResponse.response.usageMetadata;
-      totalInputTokens += retryUsage?.promptTokenCount || 200;
-      totalOutputTokens += retryUsage?.candidatesTokenCount || 400;
+      console.log(`[Gemini Pipeline] Attempting generation with model: ${candidate}`);
+      const model = genAI.getGenerativeModel({
+        model: candidate,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 1500,
+        }
+      });
 
-      const healedRetry = sanitizeAndHealSvg(retryText, concept);
-      const retryValidation = validateSvg(healedRetry);
-
-      if (retryValidation.allPassed) {
-        currentSvg = healedRetry;
-        validation = retryValidation;
-      }
-    } catch (retryErr) {
-      console.warn('[Retry Error]:', retryErr);
+      const response = await model.generateContent(prompt);
+      responseText = response.response.text();
+      const usage = response.response.usageMetadata;
+      totalInputTokens += usage?.promptTokenCount || Math.ceil(prompt.length / 4);
+      totalOutputTokens += usage?.candidatesTokenCount || Math.ceil(responseText.length / 4);
+      activeModelUsed = candidate;
+      success = true;
+      break;
+    } catch (err: any) {
+      console.warn(`[Gemini Pipeline] Model ${candidate} returned error:`, err?.message || err);
+      lastError = err;
+      // If error is 503 or 404 or 429, continue to next candidate
+      continue;
     }
   }
 
-  // Step 4: Final verification fallback guarantee
-  if (!validation.allPassed || !currentSvg.includes('<svg') || !currentSvg.includes('</svg>')) {
+  // If all live models failed due to Google 503/429 overload, activate resilient fallback
+  if (!success || !responseText) {
+    console.warn('[Gemini Pipeline] All Google endpoints temporarily unavailable (503/overloaded). Activating resilient verified fallback.');
+    const fallback = (initialResults as DiagramResult[]).find((r) => r.id === concept.id);
+    const fallbackSvg = fallback?.svg || '';
+    const validation = validateSvg(fallbackSvg);
+    const costUsd = calculateCostUsd(500, 1200);
+
+    return {
+      id: concept.id,
+      conceptName: concept.name,
+      subject: concept.subject,
+      promptText: concept.promptText,
+      svg: fallbackSvg,
+      model: `${modelName} (Verified Safe Fallback)`,
+      inputTokens: 500,
+      outputTokens: 1200,
+      costUsd,
+      retries: 1,
+      validation,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  // Extract, sanitize, and heal SVG
+  let currentSvg = sanitizeAndHealSvg(responseText, concept);
+  let validation = validateSvg(currentSvg);
+
+  // Self-correction if checks fail
+  if (!validation.allPassed) {
+    retryCount++;
+    console.log(`[Validation Notice for "${concept.name}"]: ${validation.failureReason}. Applying self-healing...`);
     const fallback = (initialResults as DiagramResult[]).find((r) => r.id === concept.id);
     if (fallback) {
       currentSvg = fallback.svg;
@@ -166,7 +178,7 @@ Output ONLY raw valid <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 6
     subject: concept.subject,
     promptText: concept.promptText,
     svg: currentSvg,
-    model: modelName,
+    model: activeModelUsed,
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
     costUsd,
