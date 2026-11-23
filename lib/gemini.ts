@@ -76,8 +76,8 @@ export async function generateDiagramWithChecks(
   const model = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 8192,
+      temperature: 0.2,
+      maxOutputTokens: 2500,
     }
   });
 

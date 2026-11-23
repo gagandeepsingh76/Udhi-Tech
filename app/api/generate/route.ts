@@ -3,6 +3,7 @@ import { SCIENCE_CONCEPTS } from '../../../lib/concepts';
 import { generateDiagramWithChecks } from '../../../lib/gemini';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // Allow up to 60s execution on Vercel
 
 export async function POST(req: NextRequest) {
   try {

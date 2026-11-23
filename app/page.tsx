@@ -106,10 +106,14 @@ export default function ReviewPortal() {
     setGenerationError(null);
     setGenerationSuccess(null);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s safety timeout
+
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           conceptId: selectedConceptId,
           model: selectedModel,
@@ -117,13 +121,23 @@ export default function ReviewPortal() {
         }),
       });
 
-      const data = await res.json();
+      clearTimeout(timeoutId);
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Generation failed with an unspecified error.');
+      const contentType = res.headers.get('content-type') || '';
+      let data: any = null;
+
+      if (contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        throw new Error(text.slice(0, 300) || `Server returned HTTP ${res.status}`);
       }
 
-      if (data.success && data.result) {
+      if (!res.ok) {
+        throw new Error(data?.error || `Generation failed (HTTP ${res.status}).`);
+      }
+
+      if (data?.success && data?.result) {
         const newResult: DiagramResult = data.result;
         // Update results list
         setResults((prev) => {
@@ -142,7 +156,12 @@ export default function ReviewPortal() {
         );
       }
     } catch (err: any) {
-      setGenerationError(err.message || 'An error occurred during live generation.');
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        setGenerationError('Generation request timed out after 45 seconds. The API model is taking longer than usual to respond. Please try again with gemini-2.5-flash-lite or check your API key.');
+      } else {
+        setGenerationError(err.message || 'An error occurred during live generation.');
+      }
     } finally {
       setIsGenerating(false);
     }
