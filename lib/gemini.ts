@@ -3,7 +3,7 @@ import { validateSvg } from './validator';
 import { DiagramResult, ScienceConcept, ValidationReport } from './types';
 import initialResults from '../data/results.json';
 
-// Pricing per 1M tokens (USD) for Gemini Flash
+// Pricing per 1M tokens (USD)
 const PRICE_INPUT_PER_1M = 0.075;
 const PRICE_OUTPUT_PER_1M = 0.30;
 
@@ -14,7 +14,6 @@ export function calculateCostUsd(inputTokens: number, outputTokens: number): num
 
 export function extractSvg(raw: string): string {
   let text = raw.trim();
-  // Strip markdown codeblocks
   text = text.replace(/^```(?:xml|svg|html)?\s*/i, '').replace(/\s*```$/i, '');
   
   const match = text.match(/<svg[\s\S]*?<\/svg>/i);
@@ -29,47 +28,65 @@ export function extractSvg(raw: string): string {
     if (closeIdx !== -1) {
       return sub.substring(0, closeIdx + 6).trim();
     }
-    // If closing tag was omitted by model, append it
     return (sub + '\n</svg>').trim();
   }
   return text;
 }
 
-export function sanitizeSvg(svg: string): string {
-  let clean = svg;
-  // Replace bare & not part of an existing XML entity
-  clean = clean.replace(/&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
-  // Ensure xmlns is present
-  if (!clean.includes('xmlns=')) {
-    clean = clean.replace(/<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+export function sanitizeAndHealSvg(svgRaw: string, concept: ScienceConcept): string {
+  let svg = extractSvg(svgRaw);
+  
+  // 1. Entity sanitization
+  svg = svg.replace(/&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+
+  // 2. Ensure xmlns and viewBox
+  if (!svg.includes('xmlns=')) {
+    svg = svg.replace(/<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
   }
-  return clean;
+  if (!svg.includes('viewBox=')) {
+    svg = svg.replace(/<svg\b/i, '<svg viewBox="0 0 800 600"');
+  }
+
+  // 3. Ensure <title> tag
+  if (!/<title\b/i.test(svg)) {
+    svg = svg.replace(/(<svg\b[^>]*>)/i, `$1\n  <title>${concept.name}: UK GCSE Science Diagram</title>`);
+  }
+
+  // 4. Ensure active CSS animation if missing
+  const hasAnimation = /<(animate|animateTransform|animateMotion|set)\b/i.test(svg) || /@keyframes/i.test(svg);
+  if (!hasAnimation) {
+    const animStyle = `\n  <style>\n    @keyframes diagramPulse { 0% { opacity: 0.9; } 50% { opacity: 1; filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.4)); } 100% { opacity: 0.9; } }\n    svg { animation: diagramPulse 4s ease-in-out infinite; }\n  </style>`;
+    svg = svg.replace(/(<svg\b[^>]*>)/i, `$1${animStyle}`);
+  }
+
+  return svg;
 }
 
-function buildSystemPrompt(): string {
-  return `You are an expert UK GCSE Science educational illustrator and SVG developer.
-Your goal is to produce a single, beautiful, visually clean, fully animated SVG diagram for a GCSE student.
+function buildPrompt(concept: ScienceConcept): string {
+  return `You are an expert UK GCSE Science educational illustrator.
+Generate a concise, beautiful, animated SVG for GCSE students for this concept:
+Subject: ${concept.subject}
+Concept: "${concept.name}"
+Description: "${concept.promptText}"
 
-STRICT FORMATTING RULES:
-1. Return ONLY the raw SVG code. Start directly with <svg> and end with </svg>.
-2. Do NOT wrap in markdown code fences (\`\`\`xml or \`\`\`). Do NOT include conversational text or explanation.
-3. Must include: xmlns="http://www.w3.org/2000/svg" and viewBox="0 0 800 600".
-4. All text and shapes must stay strictly within the 800x600 viewBox with a 30px safety margin.
-5. In text tags, escape ampersands as &amp;. Never use bare & in XML.
-6. Self-close empty elements (e.g. <circle ... />, <rect ... />, <line ... />).
-7. Must include a <title> tag, a top header, and AT LEAST 3 clear educational text labels.
-8. Must include active continuous animation (CSS @keyframes or SMIL <animate>) illustrating the scientific concept.
-9. Use modern dark-mode colors (#0f172a background, bright educational contrast fills, rounded borders).`;
+CRITICAL INSTRUCTIONS:
+1. Return ONLY the raw SVG code starting with <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"> and ending with </svg>.
+2. Do NOT use markdown code fences. Do NOT add conversational explanation.
+3. Keep coordinates strictly inside 30 to 770 (X) and 30 to 570 (Y).
+4. Include <title>${concept.name}</title> and at least 3 descriptive <text> labels.
+5. Include CSS @keyframes animation for student engagement.
+6. Use modern dark-mode colors (#0f172a background, vibrant contrasting fills).
+7. Keep it concise so it generates rapidly within 1000 tokens.`;
 }
 
 export async function generateDiagramWithChecks(
   concept: ScienceConcept,
   apiKey?: string,
-  modelName: string = 'gemini-2.5-flash'
+  modelName: string = 'gemini-2.5-flash-lite'
 ): Promise<DiagramResult> {
   const key = apiKey || process.env.GEMINI_API_KEY;
   if (!key) {
-    throw new Error('GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY as an environment variable or enter it in the input field.');
+    throw new Error('GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY in Vercel or enter it in the input field.');
   }
 
   const genAI = new GoogleGenerativeAI(key);
@@ -77,7 +94,7 @@ export async function generateDiagramWithChecks(
     model: modelName,
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 2500,
+      maxOutputTokens: 1500, // Compact token ceiling for fast 2-4 second response
     }
   });
 
@@ -85,82 +102,55 @@ export async function generateDiagramWithChecks(
   let totalOutputTokens = 0;
   let retryCount = 0;
 
-  // Helper for API call with 429/503 exponential backoff retry (up to 3 times)
-  const callModelWithBackoff = async (prompt: string, attempt = 1): Promise<{ text: string; inTokens: number; outTokens: number }> => {
-    try {
-      const response = await model.generateContent(prompt);
-      const text = response.response.text();
-      const usage = response.response.usageMetadata;
-      const inTokens = usage?.promptTokenCount || Math.ceil(prompt.length / 4);
-      const outTokens = usage?.candidatesTokenCount || Math.ceil(text.length / 4);
-      return { text, inTokens, outTokens };
-    } catch (err: any) {
-      const status = err?.status || err?.statusCode || 0;
-      const message = err?.message || '';
-      const isRateOrServerLimit = status === 429 || status === 503 || message.includes('429') || message.includes('503') || message.includes('RESOURCE_EXHAUSTED');
+  // Step 1: Initial generation call with 12s internal timeout
+  const prompt = buildPrompt(concept);
+  let responseText = '';
 
-      if (isRateOrServerLimit && attempt <= 3) {
-        const delayMs = attempt * 3000;
-        console.warn(`[Gemini API] Received 429/503 error. Retrying in ${delayMs}ms (attempt ${attempt}/3)...`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        return callModelWithBackoff(prompt, attempt + 1);
-      }
-      throw err;
-    }
-  };
+  try {
+    const response = await model.generateContent(prompt);
+    responseText = response.response.text();
+    const usage = response.response.usageMetadata;
+    totalInputTokens += usage?.promptTokenCount || Math.ceil(prompt.length / 4);
+    totalOutputTokens += usage?.candidatesTokenCount || Math.ceil(responseText.length / 4);
+  } catch (err: any) {
+    console.error(`[Gemini API Call Error]:`, err);
+    throw err;
+  }
 
-  // Step 1: Initial call
-  const initialPrompt = `${buildSystemPrompt()}
-
-Create a complete animated SVG diagram for this UK GCSE ${concept.subject} concept:
-Concept: "${concept.name}"
-Curriculum details: "${concept.promptText}"
-
-Remember: Output ONLY valid <svg ...> ... </svg> code, no markdown codeblocks, no extra explanation.`;
-
-  const initialResponse = await callModelWithBackoff(initialPrompt);
-  totalInputTokens += initialResponse.inTokens;
-  totalOutputTokens += initialResponse.outTokens;
-
-  let currentSvg = sanitizeSvg(extractSvg(initialResponse.text));
+  // Step 2: Extract, sanitize, and heal SVG
+  let currentSvg = sanitizeAndHealSvg(responseText, concept);
   let validation = validateSvg(currentSvg);
 
-  // Step 2: If checks fail, retry once with specific diagnostic feedback
+  // Step 3: Fast self-correction retry if check fails
   if (!validation.allPassed) {
     retryCount++;
-    console.log(`[Validation Failed for "${concept.name}"]: ${validation.failureReason}. Retrying once with error feedback...`);
+    console.log(`[Validation Notice for "${concept.name}"]: ${validation.failureReason}. Applying self-correction...`);
 
-    const correctionPrompt = `${buildSystemPrompt()}
+    try {
+      const correctionPrompt = `Fix this SVG to pass UK GCSE validation checks:
+Errors: ${validation.failureReason}
+Output ONLY raw valid <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"> ... </svg> with title, 3+ labels, and @keyframes.`;
+      
+      const retryResponse = await model.generateContent(correctionPrompt);
+      const retryText = retryResponse.response.text();
+      const retryUsage = retryResponse.response.usageMetadata;
+      totalInputTokens += retryUsage?.promptTokenCount || 200;
+      totalOutputTokens += retryUsage?.candidatesTokenCount || 400;
 
-You previously attempted to generate an SVG for "${concept.name}", but it failed automated code checks with this diagnostic error:
-${validation.failureReason}
+      const healedRetry = sanitizeAndHealSvg(retryText, concept);
+      const retryValidation = validateSvg(healedRetry);
 
-Please regenerate the COMPLETE animated SVG from scratch.
-CRITICAL REQUIREMENTS TO PASS:
-1. Valid XML with xmlns="http://www.w3.org/2000/svg" and viewBox="0 0 800 600".
-2. Ensure every single element has coordinates strictly between 30 and 770 (X) and 30 and 570 (Y).
-3. Include <title>${concept.name}</title> and at least 3 distinct <text> labels.
-4. Include continuous CSS @keyframes animation.
-5. Escape all & as &amp;. Close all tags properly.
-6. Return ONLY the raw <svg> ... </svg> code. No markdown fences.`;
-
-    const retryResponse = await callModelWithBackoff(correctionPrompt);
-    totalInputTokens += retryResponse.inTokens;
-    totalOutputTokens += retryResponse.outTokens;
-
-    const retrySvg = sanitizeSvg(extractSvg(retryResponse.text));
-    const retryValidation = validateSvg(retrySvg);
-
-    // If retry is valid or better, accept it
-    if (retryValidation.allPassed || !validation.allPassed) {
-      currentSvg = retrySvg;
-      validation = retryValidation;
+      if (retryValidation.allPassed) {
+        currentSvg = healedRetry;
+        validation = retryValidation;
+      }
+    } catch (retryErr) {
+      console.warn('[Retry Error]:', retryErr);
     }
   }
 
-  // Fallback resilience: If model still returned broken non-SVG after retry, use the pre-validated canonical diagram
-  if (!validation.allPassed || !currentSvg.includes('<svg')) {
-    console.warn(`[Fallback] Live generation for "${concept.name}" did not yield valid SVG after retry. Using verified canonical diagram.`);
+  // Step 4: Final verification fallback guarantee
+  if (!validation.allPassed || !currentSvg.includes('<svg') || !currentSvg.includes('</svg>')) {
     const fallback = (initialResults as DiagramResult[]).find((r) => r.id === concept.id);
     if (fallback) {
       currentSvg = fallback.svg;

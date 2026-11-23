@@ -29,7 +29,7 @@ export default function ReviewPortal() {
 
   // Live generation state
   const [selectedConceptId, setSelectedConceptId] = useState<number>(1);
-  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash-lite');
   const [customApiKey, setCustomApiKey] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -256,9 +256,9 @@ export default function ReviewPortal() {
                 onChange={(e) => setSelectedModel(e.target.value)}
                 className="w-full text-sm bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
-                <option value="gemini-2.5-flash">gemini-2.5-flash (Recommended)</option>
-                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Best Free Tier)</option>
-                <option value="gemini-2.0-flash">gemini-2.0-flash (Fast &amp; Reliable)</option>
+                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Fastest &amp; Best Free Tier - Recommended)</option>
+                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                <option value="gemini-2.0-flash">gemini-2.0-flash</option>
               </select>
             </div>
 
